@@ -3,7 +3,7 @@ import sqlite3
 import uuid
 from typing import Set
 
-__all__ = ["init_label_database", "new_label", "print_label", "print_batch"]
+__all__ = ["init_database", "new", "print", "print_batch"]
 
 
 def label_template(uuid: uuid.UUID) -> str:
@@ -26,7 +26,7 @@ def label_exists(label: uuid.UUID | str) -> bool:
     return result is not None
 
 
-def init_label_database():
+def init_database():
     """creates the label database and table if it doesn't exist"""
     connection = sqlite3.connect("label_database.db")
     cursor = connection.cursor()
@@ -35,7 +35,7 @@ def init_label_database():
     connection.close()
 
 
-def print_label(ip: str, label: uuid.UUID | str):
+def print(ip: str, label: uuid.UUID | str):
     """prints a label for the given uuid"""
     if isinstance(label, str):
         label = uuid.UUID(label)
@@ -49,7 +49,7 @@ def print_batch(ip: str, quantity: int) -> Set[uuid.UUID]:
     """prints a batch of labels"""
     new_uuids: set[uuid.UUID] = set()
     while len(new_uuids) < quantity:
-        new_uuids.add(new_label())
+        new_uuids.add(new())
     labels = [label_template(label) for label in new_uuids]
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((ip, 9100))
@@ -58,7 +58,7 @@ def print_batch(ip: str, quantity: int) -> Set[uuid.UUID]:
     return new_uuids
 
 
-def new_label() -> uuid.UUID:
+def new() -> uuid.UUID:
     """creates a new uuid in the database"""
     connection = sqlite3.connect("label_database.db")
     cursor = connection.cursor()
