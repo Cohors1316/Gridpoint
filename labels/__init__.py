@@ -1,73 +1,152 @@
 import socket
 import sqlite3
-import uuid
-from typing import Set
+from uuid import UUID, uuid4
+from typing import overload
 
-__all__ = ["init_database", "new", "print", "print_batch"]
-
-
-def label_template(uuid: uuid.UUID) -> str:
-    """returns zpl code for a label with the given uuid"""
-    return f"""
-    ^XA^FO10,0^BQN,2,4,H^FDQA,{ uuid }^FS^FO150,15^A0N,25^FB150,4,10,L^FD{ uuid }^FS^XZ
-    """
+__all__ = ["LabelDatabase"]
 
 
-def label_exists(label: uuid.UUID | str) -> bool:
-    """checks to see if a uuid already exists in the database"""
-    if isinstance(label, str):
-        label = uuid.UUID(label)
-    connection = sqlite3.connect("label_database.db")
-    cursor = connection.cursor()
-    result = cursor.execute(
-        "SELECT * FROM labels WHERE id = ?", (label.bytes,)
-    ).fetchone()
-    connection.close()
-    return result is not None
+def normalize(ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
+    """Converts everything into a set of UUIDs"""
+    if isinstance(ids, str):
+        ids = {UUID(ids)}
+    if isinstance(ids, UUID):
+        ids = {ids}
+    if isinstance(ids, set):
+        # if instances are string, convert to UUID, else leave as is
+        ids = {UUID(i) if isinstance(i, str) else i for i in ids}
+    return ids
 
 
-def init_database():
-    """creates the label database and table if it doesn't exist"""
-    connection = sqlite3.connect("label_database.db")
-    cursor = connection.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
-    connection.commit()
-    connection.close()
+def qr_code(x: int, y: int, id: UUID | str) -> str:
+    if isinstance(id, UUID):
+        id = str(id)
+    return f"^FO{x},{y}^BQN,2,4^FDQAH{id}^FS"
 
 
-def print(ip: str, label: uuid.UUID | str):
-    """prints a label for the given uuid"""
-    if isinstance(label, str):
-        label = uuid.UUID(label)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((ip, 9100))
-        s.sendall(label_template(label).encode("utf-8"))
-        s.close()
+def text(x: int, y: int, id: UUID | str) -> str:
+    if isinstance(id, UUID):
+        id = str(id)
+    formatted_id = id.upper().split("-")
+    formatted_id = f"{formatted_id[0]}-\\&{formatted_id[1]}-{formatted_id[2]}-\\&{formatted_id[3]}-\\&{formatted_id[4]}"
+    return f"^FO{x},{y}^A0N,23,24^FB150,4,14,L^FD{formatted_id}^FS"
 
 
-def print_batch(ip: str, quantity: int) -> Set[uuid.UUID]:
-    """prints a batch of labels"""
-    new_uuids: set[uuid.UUID] = set()
-    while len(new_uuids) < quantity:
-        new_uuids.add(new())
-    labels = [label_template(label) for label in new_uuids]
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((ip, 9100))
-        s.sendall("\n".join(labels).encode("utf-8"))
-        s.close()
-    return new_uuids
+def template(id: UUID | str) -> str:
+    return f"^XA^PW304{qr_code(10, 0, id)}{text(150, 10, id)}^XZ"
 
 
-def new() -> uuid.UUID:
-    """creates a new uuid in the database"""
-    connection = sqlite3.connect("label_database.db")
-    cursor = connection.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
-    connection.commit()
-    while True:
-        new_uuid = uuid.uuid4()
-        if not label_exists(new_uuid):
-            break
-    cursor.execute("INSERT INTO labels VALUES (?)", (new_uuid.bytes,))
-    connection.close()
-    return new_uuid
+def double_template(id1: UUID | str, id2: UUID | str, gap: int = 500) -> str:
+    return (
+        "^XA^PW900"
+        + qr_code(10, 0, id1)
+        + text(150, 10, id1)
+        + qr_code(10 + gap, 0, id2)
+        + text(150 + gap, 10, id2)
+        + "^XZ"
+    )
+
+
+class LabelDatabase:
+    connection: sqlite3.Connection
+    cursor: sqlite3.Cursor
+    printer_ip: str | None = None
+
+    def __init__(
+        self,
+        db_name: str = "label_database.db",
+        printer_ip: str | None = None
+    ):
+        self.connection = sqlite3.connect(db_name)
+        self.cursor = self.connection.cursor()
+        self.cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
+        self.printer_ip = printer_ip
+
+    def __contains__(self, id: UUID | set[UUID] | str | set[str]):
+        return bool(self.contains(id))
+
+    def __add__(self, other: UUID | set[UUID] | str | set[str]):
+        self.save_id(other)
+        return self
+
+    def __sub__(self, other: UUID | set[UUID] | str | set[str]):
+        self.delete_id(other)
+        return self
+
+    def __mul__(self, other: int) -> set[UUID]:
+        return self.new_id(other)
+
+    def new_id(self, quantity: int = 1) -> set[UUID]:
+        """Generates a new UUID(s) that is not already in the database."""
+        new_uuids: set[UUID] = set()
+        while len(new_uuids) < quantity:
+            while True:
+                new_uuid = uuid4()
+                if new_uuid not in self:
+                    break
+            new_uuids.add(new_uuid)
+        return new_uuids
+
+    def save_id(self, ids: UUID | set[UUID] | str | set[str]):
+        """Saves the given IDs to the database."""
+        ids = normalize(ids)
+        self.cursor.executemany(
+            "INSERT INTO labels VALUES (?)", [(i.bytes,) for i in ids]
+        )
+        self.connection.commit()
+
+    def delete_id(self, ids: UUID | set[UUID] | str | set[str]):
+        """Deletes the given ID from the database."""
+        ids = normalize(ids)
+        self.cursor.executemany(
+            "DELETE FROM labels WHERE id = ?", [(i.bytes,) for i in ids]
+        )
+        self.connection.commit()
+
+    def contains(self, ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
+        """Returns whether or not the given ID is in the database."""
+        found_ids: set[UUID] = set()
+        ids = normalize(ids)
+        # return ids of ids that are in the database
+        for id in ids:
+            self.cursor.execute("SELECT id FROM labels WHERE id = ?", (id.bytes,))
+            if self.cursor.fetchone():
+                found_ids.add(id)
+        return found_ids
+
+    @overload
+    def print(self, ids: UUID | set[UUID] | str | set[str]) -> None:
+        """Prints labels for the given ids"""
+        ...
+
+    @overload
+    def print(self, ids: int) -> set[UUID]:
+        """Creates and prints labels for the given quantity"""
+        ...
+
+    def print(self, ids: UUID | set[UUID] | str | set[str] | int) -> set[UUID] | None:
+        """Prints labels with the given ID to the printer at the given IP address."""
+        new_ids = self.new_id(ids) if isinstance(ids, int) else normalize(ids)
+        labels = [template(id) for id in new_ids]
+        if self.printer_ip is None:
+            raise Exception("Printer IP not set")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((self.printer_ip, 9100))
+            s.sendall("\n".join(labels).encode("utf-8"))
+            s.close()
+
+    def print2(self, ids: UUID | set[UUID] | str | set[str]) -> None:
+        ids = normalize(ids)
+        labels: list[str] = []
+        while ids:
+            if len(ids) == 1:
+                id = ids.pop()
+                labels.append(template(id))
+            else:
+                id1 = ids.pop()
+                id2 = ids.pop()
+                labels.append(double_template(id1, id2))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((self.printer_ip, 9100))
+            s.sendall("\n".join(labels).encode("utf-8"))
+            s.close()
