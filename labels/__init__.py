@@ -3,17 +3,17 @@ import sqlite3
 from typing import overload
 from uuid import UUID, uuid4
 
-__all__ = ["Database", "Zebra", "Media", "SingleLabelRoll", "DoubleLabelRoll"]
+__all__ = ["Database", "Zebra", "Media"]
 
 
 def qr_code(id: UUID, offset: int) -> str:
-    return f"^FO{10 + offset},0^BQN,2,4^FDQAH{id}^FS"
+    return f"^FO{0 + offset},0^BQN,2,4^FDQAH{id}^FS"
 
 
 def text(id: UUID, offset: int) -> str:
     formatted_id = str(id).upper().split("-")
     formatted_id = f"{formatted_id[0]}-\\&{formatted_id[1]}-{formatted_id[2]}-\\&{formatted_id[3]}-\\&{formatted_id[4]}"
-    return f"^FO{150 + offset},10^A0N,23,24^FB150,4,14,L^FD{formatted_id}^FS"
+    return f"^FO{145 + offset},10^A0N,21,21^FB150,4,17,L^FD{formatted_id}^FS"
 
 
 def label(id: UUID, offset: int = 0) -> str:
@@ -33,22 +33,26 @@ def normalize(ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
 
 
 class Media:
+    """measurements in mm"""
+
+    darkness: int
+    speed: float
     margins: float
     label_width: float
-    label_height: float
     gap: float
     columns: int
 
     @overload
-    def __init__(self, margins: float, label_width: float, label_height: float):
+    def __init__(self, darkness: int, speed: int, margins: float, label_width: float):
         ...
 
     @overload
     def __init__(
         self,
+        darkness: int,
+        speed: int,
         margins: float,
         label_width: float,
-        label_height: float,
         columns: int,
         gap: float,
     ):
@@ -56,36 +60,41 @@ class Media:
 
     def __init__(
         self,
+        darkness: int,
+        speed: int,
         margins: float = 0.0,
         label_width: float = 0.0,
-        label_height: float = 0.0,
         columns: int = 1,
         gap: float = 0.0,
     ):
+        self.darkness = darkness
+        self.speed = speed
         self.margins = margins
         self.label_width = label_width
-        self.label_height = label_height
         self.columns = columns
         self.gap = gap
 
     def total_width(self, printer: "Zebra") -> int:
         return int(
-            (+(self.label_width * self.columns) + (self.gap * (self.columns - 1)))
-            * printer.dpi
+            (
+                self.margins
+                + (self.label_width * self.columns)
+                + (self.gap * (self.columns - 1))
+            )
+            * printer.dpmm
         )
 
-    def offset(self, printer: "Zebra", column: int) -> int:
-        return int((self.label_width + self.gap) * column * printer.dpi)
-
-
-SingleLabelRoll = Media(0.15, 1, 0.5)
-DoubleLabelRoll = Media(0.15, 2, 0.5, 2, 0.15)
-
+    def offset(self, printer: "Zebra", column: int = 1) -> int:
+        offset = self.margins + (self.label_width + self.gap) * (column - 1)
+        return int(offset * printer.dpmm)
+        
 
 class Zebra:
     ip_address: str
     port: int = 9100
-    dpi: int = 300
+    dpmm: int = 12  # 300 dpi
+    # 203 dpi = 8 dpmm
+    # 600 dpi = 24 dpmm
 
     def __init__(self, ip_address: str, port: int = 9100):
         self.ip_address = ip_address
@@ -99,9 +108,10 @@ class Zebra:
         data: list[str] = []
         while ids:
             data.append("^XA")
+            data.append(f"^PR{media.speed}")
+            data.append(f"~SD{media.darkness}")
             data.append(f"^PW{media.total_width(self)}")
-            data.append(f"^LL{media.label_height * self.dpi}")
-            for column in range(1, media.columns):
+            for column in range(1, media.columns + 1):
                 if not ids:
                     break
                 data.append(label(ids.pop(), media.offset(self, column)))
@@ -115,15 +125,13 @@ class Zebra:
 class Database:
     connection: sqlite3.Connection
     cursor: sqlite3.Cursor
-    printer_ip: str | None = None
 
     def __init__(
-        self, db_name: str = "label_database.db", printer_ip: str | None = None
+        self, db_name: str = "labels.db"
     ):
         self.connection = sqlite3.connect(db_name)
         self.cursor = self.connection.cursor()
         self.cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
-        self.printer_ip = printer_ip
 
     def __contains__(self, id: UUID | set[UUID] | str | set[str]):
         return bool(self.contains(id))
@@ -136,7 +144,7 @@ class Database:
         self.delete_ids(other)
         return self
 
-    def __mul__(self, other: int) -> set[UUID]:
+    def __add__(self, other: int) -> set[UUID]:
         return self.new_ids(other)
 
     def new_ids(self, quantity: int = 1) -> set[UUID]:
@@ -167,7 +175,7 @@ class Database:
         self.connection.commit()
 
     def contains(self, ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
-        """Returns whether or not the given ID is in the database."""
+        """Returns ids already present in the database."""
         found_ids: set[UUID] = set()
         ids = normalize(ids)
         # return ids of ids that are in the database
