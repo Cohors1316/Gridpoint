@@ -1,9 +1,11 @@
-from labels import Database, Zebra, Media
+from labels import Database, Media, Zebra, save_and_print
 
 db = Database("test.db")
 printer = Zebra("192.168.21.107")
 
-MysteryRoll = Media(darkness=28, speed=5, margins=3, label_width=25.4, columns=3, gap=2.2)
+MysteryRoll = Media(
+    darkness=28, speed=5, margins=3, label_width=25.4, columns=3, gap=2.2
+)
 
 
 ids = db.new_ids(20)
@@ -36,3 +38,5 @@ if ids in db:
 printer(MysteryRoll, ids)
 
 test = ids in db
+
+ids = save_and_print(db, printer, MysteryRoll, 10)

@@ -3,7 +3,7 @@ import sqlite3
 from typing import overload
 from uuid import UUID, uuid4
 
-__all__ = ["Database", "Zebra", "Media"]
+__all__ = ["Database", "Zebra", "Media", "save_and_print"]
 
 
 def qr_code(id: UUID, offset: int) -> str:
@@ -182,3 +182,36 @@ class Database:
             if self.cursor.fetchone():
                 found_ids.add(id)
         return found_ids
+
+
+@overload
+def save_and_print(
+    db: Database,
+    printer: Zebra,
+    media: Media,
+    ids: UUID | str | set[UUID] | set[str],
+) -> None:
+    ...
+
+
+@overload
+def save_and_print(
+    db: Database,
+    printer: Zebra,
+    media: Media,
+    ids: int,
+) -> set[UUID]:
+    ...
+
+
+def save_and_print(
+    db: Database,
+    printer: Zebra,
+    media: Media,
+    ids: UUID | str | set[UUID] | set[str] | int,
+) -> None | set[UUID]:
+    new_ids = db.new_ids(ids) if isinstance(ids, int) else normalize(ids)
+    db.save_ids(new_ids)
+    printer.print(media, new_ids)
+    if isinstance(ids, int):
+        return new_ids
