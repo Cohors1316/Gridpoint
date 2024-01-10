@@ -1,9 +1,23 @@
 import socket
 import sqlite3
-from uuid import UUID, uuid4
 from typing import overload
+from uuid import UUID, uuid4
 
-__all__ = ["LabelDatabase"]
+__all__ = ["Database", "Zebra", "Media", "SingleLabelRoll", "DoubleLabelRoll"]
+
+
+def qr_code(id: UUID, offset: int) -> str:
+    return f"^FO{10 + offset},0^BQN,2,4^FDQAH{id}^FS"
+
+
+def text(id: UUID, offset: int) -> str:
+    formatted_id = str(id).upper().split("-")
+    formatted_id = f"{formatted_id[0]}-\\&{formatted_id[1]}-{formatted_id[2]}-\\&{formatted_id[3]}-\\&{formatted_id[4]}"
+    return f"^FO{150 + offset},10^A0N,23,24^FB150,4,14,L^FD{formatted_id}^FS"
+
+
+def label(id: UUID, offset: int = 0) -> str:
+    return qr_code(id, offset) + text(id, offset)
 
 
 def normalize(ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
@@ -18,44 +32,93 @@ def normalize(ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
     return ids
 
 
-def qr_code(x: int, y: int, id: UUID | str) -> str:
-    if isinstance(id, UUID):
-        id = str(id)
-    return f"^FO{x},{y}^BQN,2,4^FDQAH{id}^FS"
+class Media:
+    margins: float
+    label_width: float
+    label_height: float
+    gap: float
+    columns: int
+
+    @overload
+    def __init__(self, margins: float, label_width: float, label_height: float):
+        ...
+
+    @overload
+    def __init__(
+        self,
+        margins: float,
+        label_width: float,
+        label_height: float,
+        columns: int,
+        gap: float,
+    ):
+        ...
+
+    def __init__(
+        self,
+        margins: float = 0.0,
+        label_width: float = 0.0,
+        label_height: float = 0.0,
+        columns: int = 1,
+        gap: float = 0.0,
+    ):
+        self.margins = margins
+        self.label_width = label_width
+        self.label_height = label_height
+        self.columns = columns
+        self.gap = gap
+
+    def total_width(self, printer: "Zebra") -> int:
+        return int(
+            (+(self.label_width * self.columns) + (self.gap * (self.columns - 1)))
+            * printer.dpi
+        )
+
+    def offset(self, printer: "Zebra", column: int) -> int:
+        return int((self.label_width + self.gap) * column * printer.dpi)
 
 
-def text(x: int, y: int, id: UUID | str) -> str:
-    if isinstance(id, UUID):
-        id = str(id)
-    formatted_id = id.upper().split("-")
-    formatted_id = f"{formatted_id[0]}-\\&{formatted_id[1]}-{formatted_id[2]}-\\&{formatted_id[3]}-\\&{formatted_id[4]}"
-    return f"^FO{x},{y}^A0N,23,24^FB150,4,14,L^FD{formatted_id}^FS"
+SingleLabelRoll = Media(0.15, 1, 0.5)
+DoubleLabelRoll = Media(0.15, 2, 0.5, 2, 0.15)
 
 
-def template(id: UUID | str) -> str:
-    return f"^XA^PW304{qr_code(10, 0, id)}{text(150, 10, id)}^XZ"
+class Zebra:
+    ip_address: str
+    port: int = 9100
+    dpi: int = 300
+
+    def __init__(self, ip_address: str, port: int = 9100):
+        self.ip_address = ip_address
+        self.port = port
+
+    def __call__(self, media: Media, ids: UUID | str | set[UUID] | set[str]):
+        self.print(media, ids)
+
+    def print(self, media: Media, ids: UUID | str | set[UUID] | set[str]):
+        ids = normalize(ids)
+        data: list[str] = []
+        while ids:
+            data.append("^XA")
+            data.append(f"^PW{media.total_width(self)}")
+            data.append(f"^LL{media.label_height * self.dpi}")
+            for column in range(1, media.columns):
+                if not ids:
+                    break
+                data.append(label(ids.pop(), media.offset(self, column)))
+            data.append("^XZ")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((self.ip_address, self.port))
+            sock.sendall("".join(data).encode("utf-8"))
+            sock.close()
 
 
-def double_template(id1: UUID | str, id2: UUID | str, gap: int = 500) -> str:
-    return (
-        "^XA^PW900"
-        + qr_code(10, 0, id1)
-        + text(150, 10, id1)
-        + qr_code(10 + gap, 0, id2)
-        + text(150 + gap, 10, id2)
-        + "^XZ"
-    )
-
-
-class LabelDatabase:
+class Database:
     connection: sqlite3.Connection
     cursor: sqlite3.Cursor
     printer_ip: str | None = None
 
     def __init__(
-        self,
-        db_name: str = "label_database.db",
-        printer_ip: str | None = None
+        self, db_name: str = "label_database.db", printer_ip: str | None = None
     ):
         self.connection = sqlite3.connect(db_name)
         self.cursor = self.connection.cursor()
@@ -65,18 +128,18 @@ class LabelDatabase:
     def __contains__(self, id: UUID | set[UUID] | str | set[str]):
         return bool(self.contains(id))
 
-    def __add__(self, other: UUID | set[UUID] | str | set[str]):
-        self.save_id(other)
+    def __iadd__(self, other: UUID | set[UUID] | str | set[str]):
+        self.save_ids(other)
         return self
 
-    def __sub__(self, other: UUID | set[UUID] | str | set[str]):
-        self.delete_id(other)
+    def __isub__(self, other: UUID | set[UUID] | str | set[str]):
+        self.delete_ids(other)
         return self
 
     def __mul__(self, other: int) -> set[UUID]:
-        return self.new_id(other)
+        return self.new_ids(other)
 
-    def new_id(self, quantity: int = 1) -> set[UUID]:
+    def new_ids(self, quantity: int = 1) -> set[UUID]:
         """Generates a new UUID(s) that is not already in the database."""
         new_uuids: set[UUID] = set()
         while len(new_uuids) < quantity:
@@ -87,7 +150,7 @@ class LabelDatabase:
             new_uuids.add(new_uuid)
         return new_uuids
 
-    def save_id(self, ids: UUID | set[UUID] | str | set[str]):
+    def save_ids(self, ids: UUID | set[UUID] | str | set[str]):
         """Saves the given IDs to the database."""
         ids = normalize(ids)
         self.cursor.executemany(
@@ -95,7 +158,7 @@ class LabelDatabase:
         )
         self.connection.commit()
 
-    def delete_id(self, ids: UUID | set[UUID] | str | set[str]):
+    def delete_ids(self, ids: UUID | set[UUID] | str | set[str]):
         """Deletes the given ID from the database."""
         ids = normalize(ids)
         self.cursor.executemany(
@@ -113,40 +176,3 @@ class LabelDatabase:
             if self.cursor.fetchone():
                 found_ids.add(id)
         return found_ids
-
-    @overload
-    def print(self, ids: UUID | set[UUID] | str | set[str]) -> None:
-        """Prints labels for the given ids"""
-        ...
-
-    @overload
-    def print(self, ids: int) -> set[UUID]:
-        """Creates and prints labels for the given quantity"""
-        ...
-
-    def print(self, ids: UUID | set[UUID] | str | set[str] | int) -> set[UUID] | None:
-        """Prints labels with the given ID to the printer at the given IP address."""
-        new_ids = self.new_id(ids) if isinstance(ids, int) else normalize(ids)
-        labels = [template(id) for id in new_ids]
-        if self.printer_ip is None:
-            raise Exception("Printer IP not set")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.printer_ip, 9100))
-            s.sendall("\n".join(labels).encode("utf-8"))
-            s.close()
-
-    def print2(self, ids: UUID | set[UUID] | str | set[str]) -> None:
-        ids = normalize(ids)
-        labels: list[str] = []
-        while ids:
-            if len(ids) == 1:
-                id = ids.pop()
-                labels.append(template(id))
-            else:
-                id1 = ids.pop()
-                id2 = ids.pop()
-                labels.append(double_template(id1, id2))
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self.printer_ip, 9100))
-            s.sendall("\n".join(labels).encode("utf-8"))
-            s.close()
