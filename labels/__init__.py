@@ -87,7 +87,7 @@ class Media:
     def offset(self, printer: "Zebra", column: int = 1) -> int:
         offset = self.margins + (self.label_width + self.gap) * (column - 1)
         return int(offset * printer.dpmm)
-        
+
 
 class Zebra:
     ip_address: str
@@ -126,9 +126,7 @@ class Database:
     connection: sqlite3.Connection
     cursor: sqlite3.Cursor
 
-    def __init__(
-        self, db_name: str = "labels.db"
-    ):
+    def __init__(self, db_name: str = "labels.db"):
         self.connection = sqlite3.connect(db_name)
         self.cursor = self.connection.cursor()
         self.cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
