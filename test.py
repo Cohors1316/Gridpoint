@@ -2,7 +2,6 @@ from labels import Database, Media, Zebra, save_and_print
 from datetime import datetime
 
 
-
 db = Database("test.db")
 printer = Zebra("192.168.21.107")
 
@@ -197,4 +196,4 @@ db -= db
 print("All tests passed!")
 exit()
 # usefull bits
-set(db) # returns set of all ids in db
+set(db)  # returns set of all ids in db
