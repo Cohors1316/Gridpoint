@@ -22,24 +22,16 @@ def label(id: UUID, offset: int = 0) -> str:
     return qr_code(id, offset) + text(id, offset)
 
 
-def normalize(ids: UUID | str | set[UUID] | set[str] | bytes | set[bytes]) -> set[UUID]:
+def normalize(ids: UUID | str | set[UUID] | set[str] | list[tuple[bytes]]) -> set[UUID]:
     """Converts everything into a set of UUIDs"""
     if isinstance(ids, str):
         return {UUID(ids)}
-    elif isinstance(ids, UUID):
+    if isinstance(ids, UUID):
         return {ids}
-    elif isinstance(ids, bytes):
-        return {UUID(bytes=ids)}
-    else:
-        values: set[UUID] = set()
-        for i in ids:
-            if isinstance(i, UUID):
-                values.add(i)
-            elif isinstance(i, str):
-                values.add(UUID(i))
-            elif isinstance(i, bytes):
-                values.add(UUID(bytes=i))
-        return values
+    if isinstance(ids, list):
+        return {UUID(bytes=i[0]) for i in ids}
+    if isinstance(ids, set):
+        return {UUID(i) if isinstance(i, str) else i for i in ids}
 
 
 def placeholder(ids: set[UUID]) -> str:
@@ -227,16 +219,14 @@ class Database:
             f"SELECT id FROM labels WHERE id IN ({placeholder(ids)})",
             tuple(i.bytes for i in ids),
         )
-        found_ids = {UUID(bytes=i[0]) for i in self.cursor.fetchall()}
-        return ids.difference(found_ids)
+        return ids.difference(normalize(self.cursor.fetchall()))
 
     def __add__(self, other: int) -> set[UUID]:  # y = self + x
         return self.new_ids(other)
 
     def __iter__(self):  # iter(self), for i in self, set(self), list(self)
         self.cursor.execute("SELECT id FROM labels")
-        ids = {UUID(bytes=i[0]) for i in self.cursor.fetchall()}
-        return iter(ids)
+        return iter(normalize(self.cursor.fetchall()))
 
     def new_ids(self, quantity: int = 1) -> set[UUID]:
         """Generates a new UUID(s) that is not already in the database."""
@@ -276,7 +266,7 @@ class Database:
             f"SELECT id FROM labels WHERE id IN ({placeholder(ids_set)})",
             tuple(i.bytes for i in ids_set),
         )
-        return len(ids_set) == len({UUID(bytes=i[0]) for i in self.cursor.fetchall()})
+        return len(ids_set) == len(self.cursor.fetchall())
 
     def set_test_date(
         self, ids: UUID | set[UUID] | str | set[str], date: datetime = datetime.now()
@@ -292,34 +282,36 @@ class Database:
 
     @overload
     def ship_date(self, ids: UUID | str) -> datetime | None:
+        """returns the ship date for the given ID."""
         ...
 
     @overload
     def ship_date(
         self, ids: set[UUID] | set[str]
     ) -> list[tuple[UUID, datetime | None]]:
+        """Returns ship date for ids."""
         ...
 
     def ship_date(
         self, ids: UUID | str | set[UUID] | set[str]
     ) -> list[tuple[UUID, datetime | None]] | datetime | None:
-        """Returns ids that have been shipped."""
         return get_date(self, ids, "ship_date")
 
     @overload
     def test_date(self, ids: UUID | str) -> datetime | None:
+        """returns the test date for the given ID."""
         ...
 
     @overload
     def test_date(
         self, ids: set[UUID] | set[str]
     ) -> list[tuple[UUID, datetime | None]]:
+        """Returns ids with their test date."""
         ...
 
     def test_date(
         self, ids: UUID | set[UUID] | str | set[str]
     ) -> list[tuple[UUID, datetime | None]] | datetime | None:
-        """Returns ids that have been tested."""
         return get_date(self, ids, "test_date")
 
 

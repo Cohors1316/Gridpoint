@@ -195,5 +195,55 @@ except Exception:
 db -= db
 print("All tests passed!")
 exit()
-# usefull bits
-set(db)  # returns set of all ids in db
+# cheat sheet
+
+# get number of new uuids
+ids = db + 10
+ids = db.new_ids(10)
+
+
+# save uuids to db
+db += ids
+db.save_ids(ids)
+
+
+# delete uuids from db
+db -= ids
+db.delete_ids(ids)
+
+
+# uuids not in db
+not_saved = ids - db
+
+
+# get total number of uuids in db
+len(db)
+
+
+# iterate over uuids in db
+for uuid in db: pass
+set(db)
+list(db)
+iter(db)
+
+
+# compare uuids to db
+if ids in db: pass
+db.contains(ids)
+
+
+# clear db
+db -= db
+
+
+# print labels from ids
+printer.print(MysteryRoll, ids)
+printer(MysteryRoll, ids)
+
+
+# save and print labels from ids
+save_and_print(db, printer, MysteryRoll, ids)
+
+
+# create ids, save, and print labels
+printed_ids = save_and_print(db, printer, MysteryRoll, 10)
