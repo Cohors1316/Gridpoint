@@ -1,7 +1,9 @@
 import socket
 import sqlite3
-from typing import overload
+from typing import overload, Literal
 from uuid import UUID, uuid4
+from datetime import datetime
+
 
 __all__ = ["Database", "Zebra", "Media", "save_and_print"]
 
@@ -23,14 +25,60 @@ def label(id: UUID, offset: int = 0) -> str:
 def normalize(ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
     """Converts everything into a set of UUIDs"""
     if isinstance(ids, str):
-        ids = {UUID(ids)}
-    if isinstance(ids, UUID):
-        ids = {ids}
-    if isinstance(ids, set):
-        # if instances are string, convert to UUID, else leave as is
-        ids = {UUID(i) if isinstance(i, str) else i for i in ids}
-    return ids
+        return {UUID(ids)}
+    elif isinstance(ids, UUID):
+        return {ids}
+    elif isinstance(ids, set):
+        return {i if isinstance(i, UUID) else UUID(i) for i in ids}
 
+
+def placeholder(ids: set[UUID]) -> str:
+    """Returns a placeholder string for the given ids."""
+    return ", ".join(["?" for _ in ids])
+
+
+def set_date(
+    db: "Database",
+    ids: UUID | str | set[UUID] | set[str],
+    date: datetime,
+    field: Literal["test_date", "ship_date"],
+):
+    ids = normalize(ids)
+    if ids not in db:
+        raise db.UUIDNotInDatabase("ids not in database")
+    date = date.replace(microsecond=0)
+    db.cursor.executemany(
+        f"UPDATE labels SET {field} = ? WHERE id = ?",
+        tuple((date, id.bytes) for id in ids),
+    )
+    db.connection.commit()
+
+
+def get_date(
+    db: "Database",
+    ids: UUID | str | set[UUID] | set[str],
+    field: Literal["test_date", "ship_date"],
+) -> list[tuple[UUID, datetime | None]] | datetime | None:
+    ids = normalize(ids)
+    if ids not in db:
+        raise db.UUIDNotInDatabase("ids not in database")
+    db.cursor.execute(
+        f"SELECT id, {field} FROM labels WHERE id IN ({placeholder(ids)})",
+        tuple(i.bytes for i in ids),
+    )
+    found_ids = db.cursor.fetchall()
+    if isinstance(ids, (UUID, str)):
+        if not found_ids:
+            return None
+        value = found_ids.pop()[1]
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S") if value else None
+    return [
+        (
+            UUID(bytes=i[0]),
+            datetime.strptime(i[1], "%Y-%m-%d %H:%M:%S") if i[1] else None,
+        )
+        for i in found_ids
+    ]
 
 class Media:
     """measurements in mm"""
@@ -105,6 +153,8 @@ class Zebra:
 
     def print(self, media: Media, ids: UUID | str | set[UUID] | set[str]):
         ids = normalize(ids)
+        if not ids:
+            return
         data: list[str] = []
         while ids:
             data.append("^XA")
@@ -126,10 +176,22 @@ class Database:
     connection: sqlite3.Connection
     cursor: sqlite3.Cursor
 
+    class DuplicateUUID(Exception):
+        pass
+
+    class UUIDNotInDatabase(Exception):
+        pass
+
     def __init__(self, db_name: str = "labels.db"):
         self.connection = sqlite3.connect(db_name)
         self.cursor = self.connection.cursor()
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY)")
+        self.cursor.execute(
+            "CREATE TABLE IF NOT EXISTS labels (id BLOB PRIMARY KEY, test_date TEXT, ship_date TEXT)"
+        )
+
+    def __len__(self):
+        self.cursor.execute("SELECT COUNT(*) FROM labels")
+        return self.cursor.fetchone()[0]
 
     def __contains__(self, id: UUID | set[UUID] | str | set[str]):
         return bool(self.contains(id))
@@ -142,8 +204,24 @@ class Database:
         self.delete_ids(other)
         return self
 
+    def __rsub__(self, other: UUID | set[UUID] | str | set[str]):
+        """Returns a set of all ids not in the database."""
+        ids = normalize(other)
+        self.cursor.execute(
+            f"SELECT id FROM labels WHERE id IN ({placeholder(ids)})",
+            tuple(i.bytes for i in ids),
+        )
+        found_ids = {UUID(bytes=i[0]) for i in self.cursor.fetchall()}
+        return ids.difference(found_ids)
+
     def __add__(self, other: int) -> set[UUID]:
         return self.new_ids(other)
+
+    def all_ids(self) -> set[UUID]:
+        """Returns all ids in the database."""
+        self.cursor.execute("SELECT id FROM labels")
+        ids = {UUID(bytes=i[0]) for i in self.cursor.fetchall()}
+        return ids
 
     def new_ids(self, quantity: int = 1) -> set[UUID]:
         """Generates a new UUID(s) that is not already in the database."""
@@ -159,28 +237,138 @@ class Database:
     def save_ids(self, ids: UUID | set[UUID] | str | set[str]):
         """Saves the given IDs to the database."""
         ids = normalize(ids)
+        if ids in self:
+            raise self.DuplicateUUID("ids already in database")
         self.cursor.executemany(
-            "INSERT INTO labels VALUES (?)", [(i.bytes,) for i in ids]
+            "INSERT INTO labels VALUES (?, ?, ?)",  # [(i.bytes, None, None) for i in ids]
+            tuple((i.bytes, None, None) for i in ids),
         )
         self.connection.commit()
 
     def delete_ids(self, ids: UUID | set[UUID] | str | set[str]):
         """Deletes the given ID from the database."""
         ids = normalize(ids)
-        self.cursor.executemany(
-            "DELETE FROM labels WHERE id = ?", [(i.bytes,) for i in ids]
+        self.cursor.execute(
+            f"DELETE FROM labels WHERE id IN ({placeholder(ids)})",
+            tuple(i.bytes for i in ids),  # type: ignore
         )
         self.connection.commit()
 
-    def contains(self, ids: UUID | set[UUID] | str | set[str]) -> set[UUID]:
+    def contains(self, ids: UUID | set[UUID] | str | set[str]) -> bool:
         """Returns ids already present in the database."""
         found_ids: set[UUID] = set()
-        ids = normalize(ids)
+        ids_set = normalize(ids)
         # return ids of ids that are in the database
-        for id in ids:
+        for id in ids_set:
             self.cursor.execute("SELECT id FROM labels WHERE id = ?", (id.bytes,))
             if self.cursor.fetchone():
                 found_ids.add(id)
+        ids_count = len(ids_set)
+        found_ids_count = len(found_ids)
+        return ids_count == found_ids_count
+
+    def set_test_date(
+        self, ids: UUID | set[UUID] | str | set[str], date: datetime = datetime.now()
+    ):
+        """Sets the test date for the given ID. Returns True if the date was already set."""
+        ids = normalize(ids)
+        if ids not in self:
+            raise self.UUIDNotInDatabase("ids not in database")
+        date = date.replace(microsecond=0)
+        self.cursor.executemany(
+            "UPDATE labels SET test_date = ? WHERE id = ?",
+            [(date, id.bytes) for id in ids],
+        )
+        self.connection.commit()
+
+    def set_ship_date(
+        self, ids: UUID | set[UUID] | str | set[str], date: datetime = datetime.now()
+    ):
+        """Sets the ship date for the given ID. Returns True if the date was already set."""
+        ids = normalize(ids)
+        if ids not in self:
+            raise self.UUIDNotInDatabase("ids not in database")
+        date = date.replace(microsecond=0)
+        self.cursor.executemany(
+            "UPDATE labels SET ship_date = ? WHERE id = ?",
+            [(date, id.bytes) for id in ids],
+        )
+        self.connection.commit()
+
+    @overload
+    def ship_date(self, ids: UUID | str) -> datetime | None:
+        ...
+
+    @overload
+    def ship_date(
+        self, ids: set[UUID] | set[str]
+    ) -> list[tuple[UUID, datetime | None]]:
+        ...
+
+    def ship_date(
+        self, ids: UUID | set[UUID] | str | set[str]
+    ) -> list[tuple[UUID, datetime | None]] | datetime | None:
+        """Returns ids that have been shipped."""
+        id_set = normalize(ids)
+        if ids not in self:
+            raise self.UUIDNotInDatabase("ids not in database")
+        self.cursor.execute(
+            f"SELECT id, ship_date FROM labels WHERE id IN ({placeholder(id_set)})",
+            tuple(i.bytes for i in id_set),
+        )
+        found_ids = self.cursor.fetchall()
+        if isinstance(ids, (UUID, str)):
+            if not found_ids:
+                return None
+            value = found_ids.pop()[1]
+            if value is None:
+                return None
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        found_ids = [
+            (
+                UUID(bytes=i[0]),
+                datetime.strptime(i[1], "%Y-%m-%d %H:%M:%S") if i[1] else None,
+            )
+            for i in found_ids
+        ]
+        return found_ids
+
+    @overload
+    def test_date(self, ids: UUID | str) -> datetime | None:
+        ...
+
+    @overload
+    def test_date(
+        self, ids: set[UUID] | set[str]
+    ) -> list[tuple[UUID, datetime | None]]:
+        ...
+
+    def test_date(
+        self, ids: UUID | set[UUID] | str | set[str]
+    ) -> list[tuple[UUID, datetime | None]] | datetime | None:
+        """Returns ids that have been tested."""
+        id_set = normalize(ids)
+        if ids not in self:
+            raise self.UUIDNotInDatabase("ids not in database")
+        self.cursor.execute(
+            f"SELECT id, test_date FROM labels WHERE id IN ({placeholder(id_set)})",
+            tuple(i.bytes for i in id_set),
+        )
+        found_ids = self.cursor.fetchall()
+        if isinstance(ids, (UUID, str)):
+            if not found_ids:
+                return None
+            value = found_ids.pop()[1]
+            if value is None:
+                return None
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        found_ids = [
+            (
+                UUID(bytes=i[0]),
+                datetime.strptime(i[1], "%Y-%m-%d %H:%M:%S") if i[1] else None,
+            )
+            for i in found_ids
+        ]
         return found_ids
 
 
