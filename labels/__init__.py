@@ -295,7 +295,9 @@ class Database:
         ...
 
     @overload
-    def ship_date(self, ids: set[UUID] | set[str]) -> list[tuple[UUID, datetime | None]]:
+    def ship_date(
+        self, ids: set[UUID] | set[str]
+    ) -> list[tuple[UUID, datetime | None]]:
         ...
 
     def ship_date(
